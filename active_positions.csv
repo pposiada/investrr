@@ -1,2 +1,3 @@
-Symbol,EntryDate,EntryPrice,Shares,StopLoss,Target1,Phase
-TPE.WA,2026-05-28,9.56,208,8.78,9.84,1
+Symbol,EntryDate,EntryPrice,Shares,StopLoss
+TPE.WA,2026-05-29,9.56,416,9.273200000000001
+PCE.WA,2026-05-11,7.68,131,7.45

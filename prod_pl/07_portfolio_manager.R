@@ -1,5 +1,5 @@
 # 07.1_portfolio_manager.R
-# Live Portfolio Manager & Strategy Scanner - Polish Market
+# Live Portfolio Manager & Strategy Scanner (Multiple Entries & 3% Stop-Loss) - Polish Market
 
 library(quantmod)
 library(dplyr)
@@ -20,9 +20,7 @@ PTF_COLS <- cols(
   EntryDate = col_character(),
   EntryPrice = col_double(),
   Shares = col_double(),
-  StopLoss = col_double(),
-  Target1 = col_double(),
-  Phase = col_double()
+  StopLoss = col_double()
 )
 
 #' Initialize Portfolio Tracking CSV
@@ -41,8 +39,6 @@ init_portfolio <- function() {
       EntryPrice = numeric(),
       Shares = numeric(),
       StopLoss = numeric(),
-      Target1 = numeric(),
-      Phase = numeric(), # Phase 1 = Full Position, Phase 2 = Half Position (Target 1 Hit)
       stringsAsFactors = FALSE
     )
     write_csv(df, CSV_PATH)
@@ -68,29 +64,39 @@ reset_portfolio <- function() {
 
 #' Log a New Buy Transaction
 #'
-#' Adds a new active trade to the portfolio tracker. Use this function immediately 
-#' after executing a buy order in your real brokerage account.
+#' Adds a new active trade or adds to an existing trade in the portfolio tracker.
+#' Automatically calculates and updates the average entry price and the 3% stop-loss.
 #'
 #' @param symbol Character. The ticker symbol of the company (e.g., "PKO.WA").
 #' @param shares Numeric. The total number of shares purchased.
 #' @param entry_price Numeric. The exact execution price of the buy order.
-#' @param stop_loss Numeric. The structural stop loss price calculated by the strategy.
-#' @param target1 Numeric. The Target 1 (swing high) price calculated by the strategy.
 #'
 #' @return NULL (Updates the active_positions.csv file)
 #' @export
-buy_stock <- function(symbol, shares, entry_price, stop_loss, target1) {
+buy_stock <- function(symbol, shares, entry_price) {
   stopifnot(is.character(symbol), length(symbol) == 1)
   stopifnot(is.numeric(shares), shares > 0)
   stopifnot(is.numeric(entry_price), entry_price > 0)
-  stopifnot(is.numeric(stop_loss), stop_loss > 0)
-  stopifnot(is.numeric(target1), target1 > 0)
   
   init_portfolio()
   df <- read_csv(CSV_PATH, col_types = PTF_COLS)
   
   if (symbol %in% df$Symbol) {
-    cat("Warning:", symbol, "is already in the portfolio. Please use sell_stock first if this is a new trade.\n")
+    idx <- which(df$Symbol == symbol)
+    existing_shares <- df$Shares[idx]
+    existing_entry <- df$EntryPrice[idx]
+    
+    new_shares <- existing_shares + shares
+    new_entry <- ((existing_shares * existing_entry) + (shares * entry_price)) / new_shares
+    
+    df$Shares[idx] <- new_shares
+    df$EntryPrice[idx] <- new_entry
+    df$StopLoss[idx] <- new_entry * 0.97 # Update stop-loss to 3% below average entry
+    df$EntryDate[idx] <- as.character(Sys.Date()) # Update date to latest addition
+    
+    write_csv(df, CSV_PATH)
+    cat("Successfully added to existing position for", symbol, ".\n")
+    cat("New Average Price:", round(new_entry, 2), "| Total Shares:", new_shares, "| New Stop Loss:", round(new_entry * 0.97, 2), "\n")
     return()
   }
   
@@ -99,46 +105,18 @@ buy_stock <- function(symbol, shares, entry_price, stop_loss, target1) {
     EntryDate = as.character(Sys.Date()),
     EntryPrice = entry_price,
     Shares = shares,
-    StopLoss = stop_loss,
-    Target1 = target1,
-    Phase = 1
+    StopLoss = entry_price * 0.97
   )
   
   df <- bind_rows(df, new_trade)
   write_csv(df, CSV_PATH)
-  cat("Successfully added", symbol, "to portfolio.\n")
-}
-
-#' Log a Target 1 (50%) Partial Exit
-#'
-#' Updates an active trade in the portfolio tracker to reflect that 50% of the 
-#' position has been sold at Target 1. This function automatically halves the 
-#' share count and moves the stop loss up to the original entry price (break-even).
-#'
-#' @param symbol Character. The ticker symbol of the company (e.g., "PKO.WA").
-#'
-#' @return NULL (Updates the active_positions.csv file)
-#' @export
-log_partial_exit <- function(symbol) {
-  stopifnot(is.character(symbol), length(symbol) == 1)
-  
-  df <- read_csv(CSV_PATH, col_types = PTF_COLS)
-  if (symbol %in% df$Symbol) {
-    idx <- which(df$Symbol == symbol)
-    df$Shares[idx] <- floor(df$Shares[idx] / 2)
-    df$StopLoss[idx] <- df$EntryPrice[idx] # Move stop to breakeven!
-    df$Phase[idx] <- 2
-    write_csv(df, CSV_PATH)
-    cat("Successfully logged Target 1 exit for", symbol, ". Stop loss moved to breakeven.\n")
-  } else {
-    cat("Error: Cannot find", symbol, "in portfolio.\n")
-  }
+  cat("Successfully added", symbol, "to portfolio. Stop Loss (3%):", round(entry_price * 0.97, 2), "\n")
 }
 
 #' Log a Complete Position Closure
 #'
 #' Removes a stock from the active portfolio tracker. Use this function when the 
-#' position is completely closed (either by hitting the stop loss or reaching Target 2).
+#' position is completely closed.
 #'
 #' @param symbol Character. The ticker symbol of the company to remove.
 #' @param reason Character. Optional. The reason for closing the trade (e.g., "Stop Loss Hit"). Defaults to "Closed".
@@ -158,7 +136,6 @@ sell_stock <- function(symbol, reason = "Closed") {
     cat("Error: Cannot find", symbol, "in portfolio.\n")
   }
 }
-
 
 # =========================================================================
 # 2. DAILY PORTFOLIO EVALUATOR & MARKET SCANNER
@@ -218,7 +195,6 @@ df <- raw_data %>%
   select(-L10, -H10, -fastK, -fastD) %>%
   ungroup()
 
-
 # -------------------------------------------------------------------------
 # SECTION A: EVALUATE ACTIVE POSITIONS
 # -------------------------------------------------------------------------
@@ -227,6 +203,9 @@ cat(">>> ACTIVE POSITIONS EVALUATION <<<\n")
 if (nrow(portfolio) == 0) {
   cat("Your portfolio is currently empty. 100% Cash.\n\n")
 } else {
+  total_cost <- 0
+  total_value <- 0
+  
   for (i in 1:nrow(portfolio)) {
     sym <- portfolio$Symbol[i]
     trade <- portfolio[i, ]
@@ -237,39 +216,42 @@ if (nrow(portfolio) == 0) {
     C <- last_row$close
     H <- last_row$high
     L <- last_row$low
-    sma200 <- last_row$SMA200
+    
+    position_cost <- trade$EntryPrice * trade$Shares
+    position_value <- C * trade$Shares
+    profit_val <- position_value - position_cost
+    profit_pct <- (profit_val / position_cost) * 100
+    
+    total_cost <- total_cost + position_cost
+    total_value <- total_value + position_value
     
     cat("---", sym, "---\n")
-    cat("Current Price:", round(C, 2), "| Stop Loss:", round(trade$StopLoss, 2))
+    cat("Shares Owned:", trade$Shares, "\n")
+    cat("Current Close:", round(C, 2), "| Entry Price:", round(trade$EntryPrice, 2), "| Stop Loss (3%):", round(trade$StopLoss, 2), "\n")
     
-    if (trade$Phase == 1) {
-      cat(" | Target 1:", round(trade$Target1, 2), "\n")
-      
-      if (L <= trade$StopLoss) {
-        cat(">> ACTION REQUIRED: SELL ALL. Stop Loss Hit!\n")
-        cat(">> Run in console: sell_stock('", sym, "', reason='Stop Loss')\n", sep="")
-      } else if (H >= trade$Target1) {
-        cat(">> ACTION REQUIRED: SELL 50%. Target 1 Hit!\n")
-        cat(">> Run in console: log_partial_exit('", sym, "')\n", sep="")
-      } else {
-        cat(">> STATUS: HOLD 100%. Target 1 not reached.\n")
-      }
-      
-    } else if (trade$Phase == 2) {
-      cat(" | Target 2 (SMA200):", round(sma200, 2), "\n")
-      
-      if (L <= trade$StopLoss) { # Stop loss is now breakeven
-        cat(">> ACTION REQUIRED: SELL REMAINING. Breakeven Stop Hit!\n")
-        cat(">> Run in console: sell_stock('", sym, "', reason='Breakeven Stop')\n", sep="")
-      } else if (H >= sma200) {
-        cat(">> ACTION REQUIRED: SELL REMAINING. Target 2 (SMA 200) Hit!\n")
-        cat(">> Run in console: sell_stock('", sym, "', reason='Target 2 Hit')\n", sep="")
-      } else {
-        cat(">> STATUS: HOLD REMAINING 50%. Free rolling to Target 2.\n")
-      }
+    sign_char <- if (profit_val >= 0) "+" else ""
+    cat("Position Profit/Loss: ", sign_char, round(profit_val, 2), " PLN (", sign_char, round(profit_pct, 2), "%)\n", sep="")
+    
+    if (L <= trade$StopLoss) {
+      cat(">> ACTION REQUIRED: SELL ALL. Stop Loss Hit!\n")
+      cat(">> Run in console: sell_stock('", sym, "', reason='Stop Loss')\n", sep="")
+    } else {
+      cat(">> STATUS: HOLD. Current price is above stop loss.\n")
     }
     cat("\n")
   }
+  
+  total_profit_val <- total_value - total_cost
+  total_profit_pct <- if (total_cost > 0) (total_profit_val / total_cost) * 100 else 0
+  total_sign <- if (total_profit_val >= 0) "+" else ""
+  
+  cat("=================================================================\n")
+  cat("                OVERALL PORTFOLIO SUMMARY (WALLET)               \n")
+  cat("=================================================================\n")
+  cat("Total Portfolio Cost:   ", round(total_cost, 2), " PLN\n", sep="")
+  cat("Total Current Value:    ", round(total_value, 2), " PLN\n", sep="")
+  cat("Total Unrealized Profit: ", total_sign, round(total_profit_val, 2), " PLN (", total_sign, round(total_profit_pct, 2), "%)\n", sep="")
+  cat("=================================================================\n\n")
 }
 
 # -------------------------------------------------------------------------
@@ -278,7 +260,8 @@ if (nrow(portfolio) == 0) {
 cat(">>> SCANNING WATCHLIST FOR NEW SETUPS <<<\n")
 
 results <- list()
-scan_tickers <- setdiff(all_tickers, active_symbols) # Don't scan things we already own
+# We scan all tickers (including active ones) to support Multiple Entries additions
+scan_tickers <- all_tickers
 
 for (sym in scan_tickers) {
   sym_data <- df %>% filter(symbol == sym) %>% arrange(date)
@@ -329,20 +312,19 @@ for (sym in scan_tickers) {
   
   if (setup_armed) {
     if (last_row$close > last_row$SMA20 && last_row$close < last_row$SMA200) {
-      stop_loss <- lowest_low * 0.93
-      risk_pct <- (last_row$close - stop_loss) / last_row$close
+      setup_stop_loss <- lowest_low * 0.93
+      risk_pct <- (last_row$close - setup_stop_loss) / last_row$close
       
       if (risk_pct <= 0.15 && !is.na(swing_high) && swing_high > last_row$close) {
         if (!is.na(last_row$stoch_bull) && last_row$stoch_bull) {
           status <- "ACTION (ENTRY TRIGGERED)"
+          stop_loss_val <- last_row$close * 0.97 # 3% Stop-Loss
           details <- paste("Buy Price:", round(last_row$close, 2), 
-                           "| Stop Loss:", round(stop_loss, 2), 
-                           "| Target 1:", round(swing_high, 2))
+                           "| Stop Loss (3%):", round(stop_loss_val, 2))
           
-          # We provide the helper command so the user can easily log it
-          details <- paste0(details, "\n   Run: buy_stock('", sym, "', shares=100, entry_price=", 
-                            round(last_row$close, 2), ", stop_loss=", round(stop_loss, 2), 
-                            ", target1=", round(swing_high, 2), ")")
+          owned_tag <- if (sym %in% active_symbols) " (ADD TO POSITION)" else ""
+          details <- paste0(details, owned_tag, "\n   Run: buy_stock('", sym, "', shares=100, entry_price=", 
+                            round(last_row$close, 2), ")")
         }
       }
     }
