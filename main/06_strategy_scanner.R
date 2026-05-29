@@ -1,5 +1,5 @@
-# 06.1_strategy_scanner.R
-# Real-Time Market Scanner for Advanced Reversal Strategy - Polish Market
+# 06_strategy_scanner.R
+# Real-Time Market Scanner for Advanced Reversal Strategy
 
 library(quantmod)
 library(dplyr)
@@ -8,20 +8,16 @@ library(tidyquant)
 
 # 1. Universe Definition
 tickers <- c(
-  # I. Financials & Insurance (Systemic Institutions)
-  "PKO.WA", "PEO.WA", "PZU.WA", "ALR.WA", "SPL.WA", "ING.WA", "MBK.WA", "MIL.WA", "BHW.WA", "KRU.WA", "GPW.WA", "XTB.WA",
-  # II. Energy, Power & Utilities (Critical Infrastructure)
-  "PGE.WA", "TPE.WA", "ENA.WA", "PEP.WA", "ZEP.WA",
-  # III. Mining, Oil & Gas (Resource Security)
-  "PKN.WA", "KGH.WA", "JSW.WA", "LWB.WA",
-  # IV. Chemicals, Heavy Industry & Defense
-  "ATT.WA", "PCE.WA", "PUW.WA", "KTY.WA", "BRS.WA", "STP.WA", "COG.WA", "GEA.WA", "CRI.WA",
-  # V. Infrastructure, Construction & Logistics
-  "PKP.WA", "BDX.WA", "TOR.WA", "PXM.WA", "MRB.WA", "CAR.WA", "APR.WA",
-  # VI. Telecommunications, IT & Media
-  "ACP.WA", "OPL.WA", "CPS.WA", "WPL.WA", "ASB.WA",
-  # VII. Food Security, Retail & Healthcare
-  "DNP.WA", "ZAB.WA", "ALE.WA", "LPP.WA", "EUR.WA", "NEU.WA", "CDR.WA", "DOM.WA"
+  "LMT", "BA", "GD", "RTX", "NOC", "LHX", "HII", "TXT", "LDOS", "BAH",
+  "JPM", "BAC", "C", "WFC", "GS", "MS", "BK", "STT", "PNC", "USB", "COF", "TFC",
+  "XOM", "CVX", "COP", "NEE", "DUK", "SO", "D", "AEP", "EXC", "SRE", "PCG", "KMI", "WMB", "SLB", "HAL", "BKR",
+  "MSFT", "AAPL", "GOOGL", "AMZN", "META", "INTC", "NVDA", "AMD", "QCOM", "TXN", "AVGO", "MU", "AMAT", "IBM", "ORCL", "CSCO", "PANW", "CRWD",
+  "T", "VZ", "TMUS", "CMCSA", "CHTR",
+  "UNP", "CSX", "NSC", "FDX", "UPS", "DAL", "UAL", "AAL", "LUV",
+  "JNJ", "PFE", "MRK", "ABBV", "LLY", "UNH", "CVS", "ELV", "MCK", "COR", "CAH", "MRNA",
+  "ADM", "BG", "DE", "CTVA", "TSN", "GIS", "K", "CF", "MOS",
+  "F", "GM", "CAT", "CMI", "PCAR",
+  "DOW", "DD", "NUE", "FCX"
 )
 
 # 2. Data Wrangling
@@ -29,19 +25,28 @@ tickers <- c(
 start_date <- Sys.Date() - 1000
 end_date <- Sys.Date()
 
-cat("Fetching recent data for 50 Polish tickers to scan current market state...\n")
+cat("Fetching recent data for 100 tickers to scan current market state...\n")
 raw_data <- tq_get(tickers, get = "stock.prices", from = start_date, to = end_date)
 
 cat("Calculating Indicators...\n")
 df <- raw_data %>%
   group_by(symbol) %>%
   arrange(date) %>%
-  fill(open, high, low, close, .direction = "down") %>%
+  drop_na(high, low, close) %>%
   mutate(
-    SMA20 = SMA(close, n = 20),
+    SMA10 = SMA(close, n = 10),
     SMA200 = SMA(close, n = 200),
-    RSI14 = RSI(close, n = 14)
+    RSI14 = RSI(close, n = 14),
+    L14 = runMin(low, n = 14),
+    H14 = runMax(high, n = 14),
+    fastK = (close - L14) / (H14 - L14),
+    fastK = ifelse(is.nan(fastK) | is.infinite(fastK), NA, fastK),
+    fastK = zoo::na.locf(fastK, na.rm = FALSE),
+    fastK = ifelse(is.na(fastK), 0.5, fastK),
+    fastD = SMA(fastK, n = 7),
+    stoch_bull = fastK > fastD
   ) %>%
+  select(-L14, -H14, -fastK, -fastD) %>%
   ungroup()
 
 # 3. Market Scanner Loop
@@ -100,7 +105,7 @@ for (sym in tickers) {
     }
     
     # Check invalidation if armed
-    if (setup_armed && L <= (lowest_low * 0.99)) {
+    if (setup_armed && L <= (lowest_low * 0.98)) {
       setup_armed <- FALSE
     }
   }
@@ -115,17 +120,22 @@ for (sym in tickers) {
     details <- paste("RSI < 30. Current Lowest Low:", round(lowest_low, 2))
   } else if (setup_armed) {
     # Check if entry conditions are met today
-    if (last_row$close > last_row$SMA20 && last_row$close < last_row$SMA200) {
-      stop_loss <- lowest_low * 0.99
+    if (last_row$close > last_row$SMA10 && last_row$close < last_row$SMA200) {
+      stop_loss <- lowest_low * 0.98
       risk_pct <- (last_row$close - stop_loss) / last_row$close
       
       if (risk_pct <= 0.15) {
         if (!is.na(swing_high) && swing_high > last_row$close) {
-          status <- "ACTION (ENTRY TRIGGERED)"
-          details <- paste("Entry:", round(last_row$close, 2), 
-                           "| Stop:", round(stop_loss, 2), 
-                           "| Target 1:", round(swing_high, 2), 
-                           "| Risk:", round(risk_pct * 100, 1), "%")
+          if (!is.na(last_row$stoch_bull) && last_row$stoch_bull) {
+            status <- "ACTION (ENTRY TRIGGERED)"
+            details <- paste("Entry:", round(last_row$close, 2), 
+                             "| Stop:", round(stop_loss, 2), 
+                             "| Target 1:", round(swing_high, 2), 
+                             "| Risk:", round(risk_pct * 100, 1), "%")
+          } else {
+            status <- "WATCH (Waiting for Stoch 14,7)"
+            details <- "Conditions met but Stochastic(14,7) is not bullish."
+          }
         } else {
           status <- "WATCH (Invalid Target 1)"
           details <- paste("Target 1 (", round(swing_high, 2), ") is below current price.")
@@ -136,7 +146,7 @@ for (sym in tickers) {
       }
     } else {
       status <- "WATCH (Armed & Waiting)"
-      details <- paste("Waiting for Close > SMA20. Close:", round(last_row$close, 2), "SMA20:", round(last_row$SMA20, 2))
+      details <- paste("Waiting for Close > SMA10. Close:", round(last_row$close, 2), "SMA10:", round(last_row$SMA10, 2))
     }
   }
   
@@ -174,6 +184,14 @@ if (length(results) > 0) {
     print(watches, row.names = FALSE, right = FALSE)
     cat("\n")
   }
+  
+  # Save results to output directory
+  if (!dir.exists("outputs/scanner")) {
+    dir.create("outputs/scanner", recursive = TRUE)
+  }
+  file_name <- paste0("outputs/scanner/scanner_results_", format(Sys.Date(), "%Y%m%d"), ".csv")
+  write.csv(report_df, file_name, row.names = FALSE)
+  cat("Results successfully saved to:", file_name, "\n")
   
 } else {
   cat("No stocks currently meet the watch or entry criteria.\n")

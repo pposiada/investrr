@@ -1,5 +1,5 @@
-# 05_advanced_strategy.R
-# Multi-Asset Advanced Reversion Strategy (Portfolio-Level Backtest)
+# 05.5_advanced_strategy.R
+# Multi-Asset Advanced Reversion Strategy (Portfolio-Level Backtest) - 3Y High Exit
 
 library(quantmod)
 library(dplyr)
@@ -50,7 +50,8 @@ df <- raw_data %>%
     # Use close prices for consistency with OHLC rules
     SMA20 = SMA(close, n = 20),
     SMA200 = SMA(close, n = 200),
-    RSI14 = RSI(close, n = 14)
+    RSI14 = RSI(close, n = 14),
+    High3Y = runMax(high, n = 756) # 3-year rolling high (approx 756 trading days)
   ) %>%
   ungroup()
 
@@ -71,6 +72,7 @@ C_mat <- make_wide("close")
 SMA20_mat <- make_wide("SMA20")
 SMA200_mat <- make_wide("SMA200")
 RSI_mat <- make_wide("RSI14")
+High3Y_mat <- make_wide("High3Y")
 
 # 3. State Management
 symbols <- colnames(C_mat)
@@ -83,10 +85,9 @@ recent_high <- rep(NA_real_, n_symbols)
 swing_high  <- rep(NA_real_, n_symbols)
 lowest_low  <- rep(NA_real_, n_symbols)
 
-position    <- rep(0, n_symbols)       # 0, 0.5, or 1
+position    <- rep(0, n_symbols)       # 0 or 1
 entry_price <- rep(NA_real_, n_symbols)
 stop_loss   <- rep(NA_real_, n_symbols)
-target1     <- rep(NA_real_, n_symbols)
 shares      <- rep(0, n_symbols)
 
 global_cash <- 100000
@@ -96,8 +97,8 @@ equity_curve <- numeric(length(dates))
 # 4. Multi-Asset Event Loop
 cat("Running Portfolio Event Loop over time...\n")
 
-# Start loop at day 201 to ensure SMA200 is populated
-for (i in 201:length(dates)) {
+# Start loop at day 757 to ensure High3Y is populated
+for (i in 757:length(dates)) {
   current_date <- dates[i]
   
   # Current day vectors (one element per symbol)
@@ -108,9 +109,10 @@ for (i in 201:length(dates)) {
   rsi <- RSI_mat[i, ]
   sma20 <- SMA20_mat[i, ]
   sma200 <- SMA200_mat[i, ]
+  high3y <- High3Y_mat[i, ]
   
   # Active symbols today (avoid NAs for recently listed/delisted stocks)
-  active_idx <- which(!is.na(C_today) & !is.na(sma200) & !is.na(rsi))
+  active_idx <- which(!is.na(C_today) & !is.na(sma200) & !is.na(rsi) & !is.na(high3y))
   
   triggered_indices <- integer(0)
   
@@ -131,7 +133,7 @@ for (i in 201:length(dates)) {
       if (!in_rsi_zone[j]) {
         # Just entered zone
         in_rsi_zone[j] <- TRUE
-        swing_high[j] <- recent_high[j] # Lock Target 1
+        swing_high[j] <- recent_high[j]
         lowest_low[j] <- L_today[j]
         setup_armed[j] <- FALSE
         recent_high[j] <- NA
@@ -162,21 +164,13 @@ for (i in 201:length(dates)) {
         position[j] <- 0
         setup_armed[j] <- FALSE
       } else {
-        # Check Target 1 (50% position sell)
-        if (position[j] == 1 && H_today[j] >= target1[j]) {
-          exec_price_t1 <- ifelse(O_today[j] > target1[j], O_today[j], target1[j])
-          sell_shares <- floor(shares[j] / 2)
-          global_cash <- global_cash + (sell_shares * exec_price_t1)
-          shares[j] <- shares[j] - sell_shares
-          position[j] <- 0.5
-          stop_loss[j] <- entry_price[j] # RISK FREE TRAIL
-          trade_log[[length(trade_log) + 1]] <- data.frame(Date = current_date, Symbol = sym, Action = "TARGET_1_HIT", Price = exec_price_t1, Shares = -sell_shares)
-        }
-        # Check Target 2 (SMA 200 Reversion)
-        if (position[j] == 0.5 && H_today[j] >= sma200[j]) {
-          exec_price_t2 <- ifelse(O_today[j] > sma200[j], O_today[j], sma200[j])
-          global_cash <- global_cash + (shares[j] * exec_price_t2)
-          trade_log[[length(trade_log) + 1]] <- data.frame(Date = current_date, Symbol = sym, Action = "TARGET_2_HIT", Price = exec_price_t2, Shares = -shares[j])
+        # Exit: 90% of highest high from last 3 years
+        target_exit <- high3y[j] * 0.90
+        
+        if (H_today[j] >= target_exit) {
+          exec_price_exit <- ifelse(O_today[j] > target_exit, O_today[j], target_exit)
+          global_cash <- global_cash + (shares[j] * exec_price_exit)
+          trade_log[[length(trade_log) + 1]] <- data.frame(Date = current_date, Symbol = sym, Action = "TARGET_HIT", Price = exec_price_exit, Shares = -shares[j])
           shares[j] <- 0
           position[j] <- 0
         }
@@ -219,7 +213,6 @@ for (i in 201:length(dates)) {
         shares[j] <- alloc_shares
         position[j] <- 1
         entry_price[j] <- entry_px
-        target1[j] <- swing_high[j]
         setup_armed[j] <- FALSE
         
         trade_log[[length(trade_log) + 1]] <- data.frame(Date = current_date, Symbol = sym, Action = "ENTRY", Price = entry_px, Shares = alloc_shares)
@@ -267,10 +260,10 @@ p <- ggplot(plot_data, aes(x = Date, y = Equity)) +
   geom_line(color = "purple") +
   theme_minimal() +
   labs(title = "Portfolio Advanced Reversal Strategy",
-       subtitle = "100 Systemically Important Companies (100% Cash Deployment, Equal Split)",
+       subtitle = "100 Companies (Exit @ 90% of 3-Year High)",
        y = "Portfolio Equity ($)",
        x = "Date")
 
 print(p)
-ggsave("portfolio_advanced_equity.png", plot = p, width = 10, height = 6)
-cat("Multi-asset backtest complete! Results saved to portfolio_advanced_equity.png\n")
+ggsave("portfolio_advanced_equity_high3y_exit.png", plot = p, width = 10, height = 6)
+cat("Multi-asset backtest complete! Results saved to portfolio_advanced_equity_high3y_exit.png\n")

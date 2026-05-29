@@ -1,5 +1,5 @@
-# 07.1_portfolio_manager.R
-# Live Portfolio Manager & Strategy Scanner - Polish Market
+# 07_portfolio_manager.R
+# Live Portfolio Manager & Strategy Scanner
 
 library(quantmod)
 library(dplyr)
@@ -71,7 +71,7 @@ reset_portfolio <- function() {
 #' Adds a new active trade to the portfolio tracker. Use this function immediately 
 #' after executing a buy order in your real brokerage account.
 #'
-#' @param symbol Character. The ticker symbol of the company (e.g., "PKO.WA").
+#' @param symbol Character. The ticker symbol of the company (e.g., "AAPL").
 #' @param shares Numeric. The total number of shares purchased.
 #' @param entry_price Numeric. The exact execution price of the buy order.
 #' @param stop_loss Numeric. The structural stop loss price calculated by the strategy.
@@ -115,7 +115,7 @@ buy_stock <- function(symbol, shares, entry_price, stop_loss, target1) {
 #' position has been sold at Target 1. This function automatically halves the 
 #' share count and moves the stop loss up to the original entry price (break-even).
 #'
-#' @param symbol Character. The ticker symbol of the company (e.g., "PKO.WA").
+#' @param symbol Character. The ticker symbol of the company (e.g., "AAPL").
 #'
 #' @return NULL (Updates the active_positions.csv file)
 #' @export
@@ -167,20 +167,16 @@ sell_stock <- function(symbol, reason = "Closed") {
 
 # The Master Universe
 all_tickers <- c(
-  # I. Financials & Insurance (Systemic Institutions)
-  "PKO.WA", "PEO.WA", "PZU.WA", "ALR.WA", "SPL.WA", "ING.WA", "MBK.WA", "MIL.WA", "BHW.WA", "KRU.WA", "GPW.WA", "XTB.WA",
-  # II. Energy, Power & Utilities (Critical Infrastructure)
-  "PGE.WA", "TPE.WA", "ENA.WA", "PEP.WA", "ZEP.WA",
-  # III. Mining, Oil & Gas (Resource Security)
-  "PKN.WA", "KGH.WA", "JSW.WA", "LWB.WA",
-  # IV. Chemicals, Heavy Industry & Defense
-  "ATT.WA", "PCE.WA", "PUW.WA", "KTY.WA", "BRS.WA", "STP.WA", "COG.WA", "GEA.WA", "CRI.WA",
-  # V. Infrastructure, Construction & Logistics
-  "PKP.WA", "BDX.WA", "TOR.WA", "PXM.WA", "MRB.WA", "CAR.WA", "APR.WA",
-  # VI. Telecommunications, IT & Media
-  "ACP.WA", "OPL.WA", "CPS.WA", "WPL.WA", "ASB.WA",
-  # VII. Food Security, Retail & Healthcare
-  "DNP.WA", "ZAB.WA", "ALE.WA", "LPP.WA", "EUR.WA", "NEU.WA", "CDR.WA", "DOM.WA"
+  "LMT", "BA", "GD", "RTX", "NOC", "LHX", "HII", "TXT", "LDOS", "BAH",
+  "JPM", "BAC", "C", "WFC", "GS", "MS", "BK", "STT", "PNC", "USB", "COF", "TFC",
+  "XOM", "CVX", "COP", "NEE", "DUK", "SO", "D", "AEP", "EXC", "SRE", "PCG", "KMI", "WMB", "SLB", "HAL", "BKR",
+  "MSFT", "AAPL", "GOOGL", "AMZN", "META", "INTC", "NVDA", "AMD", "QCOM", "TXN", "AVGO", "MU", "AMAT", "IBM", "ORCL", "CSCO", "PANW", "CRWD",
+  "T", "VZ", "TMUS", "CMCSA", "CHTR",
+  "UNP", "CSX", "NSC", "FDX", "UPS", "DAL", "UAL", "AAL", "LUV",
+  "JNJ", "PFE", "MRK", "ABBV", "LLY", "UNH", "CVS", "ELV", "MCK", "COR", "CAH", "MRNA",
+  "ADM", "BG", "DE", "CTVA", "TSN", "GIS", "K", "CF", "MOS",
+  "F", "GM", "CAT", "CMI", "PCAR",
+  "DOW", "DD", "NUE", "FCX"
 )
 
 init_portfolio()
@@ -193,7 +189,7 @@ cat("Date:", as.character(Sys.Date()), "\n")
 cat("=================================================================\n\n")
 
 # Fetch recent data for everyone
-cat("Fetching market data for 50 Polish tickers...\n")
+cat("Fetching market data...\n")
 start_date <- Sys.Date() - 1000
 raw_data <- tq_get(all_tickers, get = "stock.prices", from = start_date, to = Sys.Date())
 
@@ -201,12 +197,21 @@ cat("Calculating Indicators...\n\n")
 df <- raw_data %>%
   group_by(symbol) %>%
   arrange(date) %>%
-  fill(open, high, low, close, .direction = "down") %>%
+  drop_na(high, low, close) %>%
   mutate(
-    SMA20 = SMA(close, n = 20),
+    SMA10 = SMA(close, n = 10),
     SMA200 = SMA(close, n = 200),
-    RSI14 = RSI(close, n = 14)
+    RSI14 = RSI(close, n = 14),
+    L14 = runMin(low, n = 14),
+    H14 = runMax(high, n = 14),
+    fastK = (close - L14) / (H14 - L14),
+    fastK = ifelse(is.nan(fastK) | is.infinite(fastK), NA, fastK),
+    fastK = zoo::na.locf(fastK, na.rm = FALSE),
+    fastK = ifelse(is.na(fastK), 0.5, fastK),
+    fastD = SMA(fastK, n = 7),
+    stoch_bull = fastK > fastD
   ) %>%
+  select(-L14, -H14, -fastK, -fastD) %>%
   ungroup()
 
 
@@ -310,7 +315,7 @@ for (sym in scan_tickers) {
       setup_armed <- TRUE
     }
     
-    if (setup_armed && L <= (lowest_low * 0.99)) setup_armed <- FALSE
+    if (setup_armed && L <= (lowest_low * 0.98)) setup_armed <- FALSE
   }
   
   # Check Final Day Status
@@ -319,20 +324,22 @@ for (sym in scan_tickers) {
   details <- ""
   
   if (setup_armed) {
-    if (last_row$close > last_row$SMA20 && last_row$close < last_row$SMA200) {
-      stop_loss <- lowest_low * 0.99
+    if (last_row$close > last_row$SMA10 && last_row$close < last_row$SMA200) {
+      stop_loss <- lowest_low * 0.98
       risk_pct <- (last_row$close - stop_loss) / last_row$close
       
       if (risk_pct <= 0.15 && !is.na(swing_high) && swing_high > last_row$close) {
-        status <- "ACTION (ENTRY TRIGGERED)"
-        details <- paste("Buy Price:", round(last_row$close, 2), 
-                         "| Stop Loss:", round(stop_loss, 2), 
-                         "| Target 1:", round(swing_high, 2))
-        
-        # We provide the helper command so the user can easily log it
-        details <- paste0(details, "\n   Run: buy_stock('", sym, "', shares=100, entry_price=", 
-                          round(last_row$close, 2), ", stop_loss=", round(stop_loss, 2), 
-                          ", target1=", round(swing_high, 2), ")")
+        if (!is.na(last_row$stoch_bull) && last_row$stoch_bull) {
+          status <- "ACTION (ENTRY TRIGGERED)"
+          details <- paste("Buy Price:", round(last_row$close, 2), 
+                           "| Stop Loss:", round(stop_loss, 2), 
+                           "| Target 1:", round(swing_high, 2))
+          
+          # We provide the helper command so the user can easily log it
+          details <- paste0(details, "\n   Run: buy_stock('", sym, "', shares=100, entry_price=", 
+                            round(last_row$close, 2), ", stop_loss=", round(stop_loss, 2), 
+                            ", target1=", round(swing_high, 2), ")")
+        }
       }
     }
   }

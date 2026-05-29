@@ -1,5 +1,5 @@
-# 05.4_advanced_strategy.R
-# Multi-Asset Advanced Reversion Strategy (Portfolio-Level Backtest) - Polish Market
+# 05_advanced_strategy.R
+# Multi-Asset Advanced Reversion Strategy (Portfolio-Level Backtest)
 
 library(quantmod)
 library(dplyr)
@@ -10,43 +10,58 @@ library(purrr)
 
 # 1. Universe Definition
 tickers <- c(
-  # I. Financials & Insurance (Systemic Institutions)
-  "PKO.WA", "PEO.WA", "PZU.WA", "ALR.WA", "SPL.WA", "ING.WA", "MBK.WA", "MIL.WA", "BHW.WA", "KRU.WA", "GPW.WA", "XTB.WA",
-  # II. Energy, Power & Utilities (Critical Infrastructure)
-  "PGE.WA", "TPE.WA", "ENA.WA", "PEP.WA", "ZEP.WA",
-  # III. Mining, Oil & Gas (Resource Security)
-  "PKN.WA", "KGH.WA", "JSW.WA", "LWB.WA",
-  # IV. Chemicals, Heavy Industry & Defense
-  "ATT.WA", "PCE.WA", "PUW.WA", "KTY.WA", "BRS.WA", "STP.WA", "COG.WA", "GEA.WA", "CRI.WA",
-  # V. Infrastructure, Construction & Logistics
-  "PKP.WA", "BDX.WA", "TOR.WA", "PXM.WA", "MRB.WA", "CAR.WA", "APR.WA",
-  # VI. Telecommunications, IT & Media
-  "ACP.WA", "OPL.WA", "CPS.WA", "WPL.WA", "ASB.WA",
-  # VII. Food Security, Retail & Healthcare
-  "DNP.WA", "ZAB.WA", "ALE.WA", "LPP.WA", "EUR.WA", "NEU.WA", "CDR.WA", "DOM.WA"
+  # Defense & Aerospace
+  "LMT", "BA", "GD", "RTX", "NOC", "LHX", "HII", "TXT", "LDOS", "BAH",
+  # Systemically Important Financial Institutions
+  "JPM", "BAC", "C", "WFC", "GS", "MS", "BK", "STT", "PNC", "USB", "COF", "TFC",
+  # Energy & Power
+  "XOM", "CVX", "COP", "NEE", "DUK", "SO", "D", "AEP", "EXC", "SRE", "PCG", "KMI", "WMB", "SLB", "HAL", "BKR",
+  # Technology & Semiconductors
+  "MSFT", "AAPL", "GOOGL", "AMZN", "META", "INTC", "NVDA", "AMD", "QCOM", "TXN", "AVGO", "MU", "AMAT", "IBM", "ORCL", "CSCO", "PANW", "CRWD",
+  # Telecommunications
+  "T", "VZ", "TMUS", "CMCSA", "CHTR",
+  # Transportation & Logistics
+  "UNP", "CSX", "NSC", "FDX", "UPS", "DAL", "UAL", "AAL", "LUV",
+  # Healthcare & Pharmaceuticals
+  "JNJ", "PFE", "MRK", "ABBV", "LLY", "UNH", "CVS", "ELV", "MCK", "COR", "CAH", "MRNA",
+  # Agriculture & Food Supply
+  "ADM", "BG", "DE", "CTVA", "TSN", "GIS", "K", "CF", "MOS",
+  # Automotive & Heavy Manufacturing
+  "F", "GM", "CAT", "CMI", "PCAR",
+  # Materials & Chemicals
+  "DOW", "DD", "NUE", "FCX"
 )
 
 # 2. Data Wrangling
-cat("Fetching daily data for 50 Polish tickers (This may take 1-2 minutes)...\n")
+cat("Fetching daily data for 100 tickers (This may take 1-2 minutes)...\n")
 # Using tq_get to fetch everything efficiently
 raw_data <- tq_get(tickers, get = "stock.prices", from = "2018-01-01", to = "2026-12-31")
 
-cat("Fetching WIG20 data for benchmark comparison...\n")
-benchmark_data <- tq_get("WIG20.WA", get = "stock.prices", from = "2018-01-01", to = "2026-12-31") %>%
-  select(date, Benchmark_Close = close) %>%
-  mutate(Benchmark_Return = Benchmark_Close / lag(Benchmark_Close) - 1)
+cat("Fetching S&P 500 data for benchmark comparison...\n")
+sp500_data <- tq_get("^GSPC", get = "stock.prices", from = "2018-01-01", to = "2026-12-31") %>%
+  select(date, SP500_Close = close) %>%
+  mutate(SP500_Return = SP500_Close / lag(SP500_Close) - 1)
 
 cat("Calculating Indicators...\n")
 df <- raw_data %>%
   group_by(symbol) %>%
   arrange(date) %>%
-  fill(open, high, low, close, .direction = "down") %>%
+  drop_na(high, low, close) %>%
   mutate(
     # Use close prices for consistency with OHLC rules
-    SMA20 = SMA(close, n = 20),
+    SMA10 = SMA(close, n = 10),
     SMA200 = SMA(close, n = 200),
-    RSI14 = RSI(close, n = 14)
+    RSI14 = RSI(close, n = 14),
+    L14 = runMin(low, n = 14),
+    H14 = runMax(high, n = 14),
+    fastK = (close - L14) / (H14 - L14),
+    fastK = ifelse(is.nan(fastK) | is.infinite(fastK), NA, fastK),
+    fastK = zoo::na.locf(fastK, na.rm = FALSE),
+    fastK = ifelse(is.na(fastK), 0.5, fastK),
+    fastD = SMA(fastK, n = 7),
+    stoch_bull = fastK > fastD
   ) %>%
+  select(-L14, -H14, -fastK, -fastD) %>%
   ungroup()
 
 # To make the event loop fast, we pivot the required columns to wide format
@@ -63,9 +78,10 @@ O_mat <- make_wide("open")
 H_mat <- make_wide("high")
 L_mat <- make_wide("low")
 C_mat <- make_wide("close")
-SMA20_mat <- make_wide("SMA20")
+SMA10_mat <- make_wide("SMA10")
 SMA200_mat <- make_wide("SMA200")
 RSI_mat <- make_wide("RSI14")
+stoch_mat <- make_wide("stoch_bull")
 
 # 3. State Management
 symbols <- colnames(C_mat)
@@ -101,8 +117,9 @@ for (i in 201:length(dates)) {
   L_today <- L_mat[i, ]
   C_today <- C_mat[i, ]
   rsi <- RSI_mat[i, ]
-  sma20 <- SMA20_mat[i, ]
+  sma10 <- SMA10_mat[i, ]
   sma200 <- SMA200_mat[i, ]
+  stoch_today <- stoch_mat[i, ]
   
   # Active symbols today (avoid NAs for recently listed/delisted stocks)
   active_idx <- which(!is.na(C_today) & !is.na(sma200) & !is.na(rsi))
@@ -140,7 +157,7 @@ for (i in 201:length(dates)) {
       # Trigger: RSI broke > 30
       in_rsi_zone[j] <- FALSE
       setup_armed[j] <- TRUE
-      stop_loss[j] <- lowest_low[j] * 0.99
+      stop_loss[j] <- lowest_low[j] * 0.98
     }
     
     # ---------------------------------------------------------
@@ -183,12 +200,14 @@ for (i in 201:length(dates)) {
     else if (position[j] == 0 && setup_armed[j]) {
       if (L_today[j] <= stop_loss[j]) {
         setup_armed[j] <- FALSE # Support broke, invalidate
-      } else if (C_today[j] > sma20[j] && C_today[j] < sma200[j]) {
+      } else if (C_today[j] > sma10[j] && C_today[j] < sma200[j]) {
         risk_pct <- (C_today[j] - stop_loss[j]) / C_today[j]
         if (risk_pct <= 0.15) {
            if (!is.na(swing_high[j]) && swing_high[j] > C_today[j]) {
-              # Valid entry trigger
-              triggered_indices <- c(triggered_indices, j)
+              if (!is.na(stoch_today[j]) && stoch_today[j]) {
+                # Valid entry trigger
+                triggered_indices <- c(triggered_indices, j)
+              }
            }
         } else {
           setup_armed[j] <- FALSE # Rejected (Risk > 15%)
@@ -239,28 +258,17 @@ trade_df <- bind_rows(trade_log)
 
 cat("\n============================================\n")
 cat("Total Trades Executed:", nrow(trade_df), "\n")
-cat("Final Portfolio Value: ", round(equity_curve[length(equity_curve)], 2), " PLN\n")
+cat("Final Portfolio Value: $", round(equity_curve[length(equity_curve)], 2), "\n")
 
 # Calculate Strategy Returns and Correlation
 plot_data <- data.frame(Date = dates, Equity = equity_curve) %>% filter(!is.na(Equity) & Equity > 0)
 plot_data <- plot_data %>% 
-  mutate(Strategy_Return = Equity / lag(Equity) - 1)
+  mutate(Strategy_Return = Equity / lag(Equity) - 1) %>%
+  left_join(sp500_data, by = c("Date" = "date"))
 
-if (nrow(benchmark_data) > 0 && "Benchmark_Return" %in% colnames(benchmark_data)) {
-  plot_data <- plot_data %>%
-    left_join(benchmark_data, by = c("Date" = "date"))
-  
-  # Check if we have enough complete pairs for correlation
-  complete_pairs <- sum(complete.cases(plot_data$Strategy_Return, plot_data$Benchmark_Return))
-  if (complete_pairs > 2) {
-    strat_cor <- cor(plot_data$Strategy_Return, plot_data$Benchmark_Return, use = "complete.obs")
-    cat("Strategy vs WIG20 Correlation:", round(strat_cor, 4), "\n")
-  } else {
-    cat("Strategy vs WIG20 Correlation: Not enough valid benchmark data points.\n")
-  }
-} else {
-  cat("Strategy vs WIG20 Correlation: Benchmark data unavailable.\n")
-}
+strat_cor <- cor(plot_data$Strategy_Return, plot_data$SP500_Return, use = "complete.obs")
+
+cat("Strategy vs S&P 500 Correlation:", round(strat_cor, 4), "\n")
 cat("============================================\n\n")
 
 if (nrow(trade_df) > 0) {
@@ -272,11 +280,11 @@ plot_data <- data.frame(Date = dates, Equity = equity_curve) %>% filter(!is.na(E
 p <- ggplot(plot_data, aes(x = Date, y = Equity)) +
   geom_line(color = "purple") +
   theme_minimal() +
-  labs(title = "Portfolio Advanced Reversal Strategy - Polish Market",
-       subtitle = "50 Systemically Important Companies (100% Cash Deployment, Equal Split)",
-       y = "Portfolio Equity (PLN)",
+  labs(title = "Portfolio Advanced Reversal Strategy",
+       subtitle = "100 Companies (Optimized: RSI14, SMA10, Stoch(14,7), SL-2%)",
+       y = "Portfolio Equity ($)",
        x = "Date")
 
 print(p)
-ggsave("portfolio_advanced_equity_pl.png", plot = p, width = 10, height = 6)
-cat("Multi-asset backtest complete! Results saved to portfolio_advanced_equity_pl.png\n")
+ggsave("outputs/portfolio_advanced_equity.png", plot = p, width = 10, height = 6)
+cat("Multi-asset backtest complete! Results saved to outputs/portfolio_advanced_equity.png\n")
